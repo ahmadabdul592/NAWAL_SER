@@ -128,6 +128,64 @@ def load_scalers():
         return None
 
 
+# ── MP4 audio extraction ──────────────────────────────────────────────────────
+def extract_audio_from_mp4(mp4_bytes: bytes) -> bytes | None:
+    """Extract the audio track from an MP4 file and return raw WAV bytes.
+
+    Requires FFmpeg to be available on PATH.
+    On Streamlit Cloud, add a packages.txt containing:
+        ffmpeg
+    On a local machine, install via your OS package manager.
+    """
+    import tempfile
+    import subprocess
+    import shutil
+
+    if shutil.which("ffmpeg") is None:
+        st.error(
+            "❌ FFmpeg is not installed. "
+            "Add `ffmpeg` to your `packages.txt` (Streamlit Cloud) "
+            "or install it locally before using MP4 files."
+        )
+        return None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_in:
+            tmp_in.write(mp4_bytes)
+            tmp_in_path = tmp_in.name
+
+        tmp_out_path = tmp_in_path.replace(".mp4", "_audio.wav")
+
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", tmp_in_path,
+                "-vn",                        # drop video stream
+                "-acodec", "pcm_s16le",       # uncompressed PCM
+                "-ar", str(SAMPLE_RATE),      # target sample rate
+                "-ac", "1",                   # mono
+                tmp_out_path,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        with open(tmp_out_path, "rb") as f:
+            wav_bytes = f.read()
+
+        os.remove(tmp_in_path)
+        os.remove(tmp_out_path)
+        return wav_bytes
+
+    except subprocess.CalledProcessError as e:
+        st.error(f"❌ FFmpeg failed to extract audio from MP4: {e}")
+        return None
+    except Exception as e:
+        st.error(f"❌ MP4 audio extraction error: {e}")
+        return None
+
+
 # ── Feature helpers ───────────────────────────────────────────────────────────
 def load_and_preprocess(audio_bytes: bytes) -> np.ndarray | None:
     try:
@@ -249,7 +307,7 @@ def plot_waveform(audio_bytes: bytes) -> plt.Figure:
 # UI
 # ═════════════════════════════════════════════════════════════════════════════
 
-# ── Hero Banner (all inline styles — Streamlit-safe) ─────────────────────────
+# ── Hero Banner ───────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@800&family=DM+Sans:wght@300;400&display=swap');
@@ -309,11 +367,16 @@ if model is None or scalers is None:
     st.stop()
 
 # ── Upload section ────────────────────────────────────────────────────────────
-st.markdown('<div style="font-family:sans-serif;font-size:0.78rem;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:#63b3ed;margin-bottom:10px;">&#128193; Upload Audio File</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div style="font-family:sans-serif;font-size:0.78rem;font-weight:700;'
+    'letter-spacing:2.5px;text-transform:uppercase;color:#63b3ed;margin-bottom:10px;">'
+    '&#128193; Upload Audio / Video File</div>',
+    unsafe_allow_html=True,
+)
 uploaded = st.file_uploader(
     "Drop your file here",
-    type=["wav", "mp3", "ogg", "flac", "m4a"],
-    help="Supported: WAV, MP3, OGG, FLAC, M4A — ideal length 2–5 seconds",
+    type=["wav", "mp3", "ogg", "flac", "m4a", "mp4"],
+    help="Supported: WAV, MP3, OGG, FLAC, M4A, MP4 — ideal length 2–5 seconds",
     label_visibility="collapsed",
 )
 
@@ -321,20 +384,33 @@ st.markdown(
     '<div style="text-align:center;color:rgba(255,255,255,0.28);'
     'font-size:0.8rem;letter-spacing:2px;text-transform:uppercase;'
     'margin:12px 0;">— or —</div>',
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
-st.markdown('<div style="font-family:sans-serif;font-size:0.78rem;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:#63b3ed;margin-bottom:10px;">&#127908; Record from Microphone</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div style="font-family:sans-serif;font-size:0.78rem;font-weight:700;'
+    'letter-spacing:2.5px;text-transform:uppercase;color:#63b3ed;margin-bottom:10px;">'
+    '&#127908; Record from Microphone</div>',
+    unsafe_allow_html=True,
+)
 recorded = st.audio_input("Record", label_visibility="collapsed")
 
-audio_bytes = None
+audio_bytes  = None
 source_label = ""
 
 if recorded is not None:
     audio_bytes  = recorded.read()
     source_label = "🎤 Microphone recording"
 elif uploaded is not None:
-    audio_bytes  = uploaded.read()
-    source_label = f"📂 {uploaded.name}"
+    raw_bytes = uploaded.read()
+    if uploaded.name.lower().endswith(".mp4"):
+        with st.spinner("Extracting audio from MP4…"):
+            audio_bytes = extract_audio_from_mp4(raw_bytes)
+        if audio_bytes is None:
+            st.stop()
+        source_label = f"🎬 {uploaded.name} (audio extracted)"
+    else:
+        audio_bytes  = raw_bytes
+        source_label = f"📂 {uploaded.name}"
 
 # ── Process & display ─────────────────────────────────────────────────────────
 if audio_bytes:
@@ -407,7 +483,7 @@ else:
         unsafe_allow_html=True,
     )
 
-# ── Footer (all inline styles — Streamlit-safe) ───────────────────────────────
+# ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div style="margin-top:60px;padding:40px 24px 32px;background:linear-gradient(135deg,#0d0d1a,#0f1f3d);border-radius:20px 20px 0 0;border-top:1px solid rgba(99,179,237,0.2);text-align:center;position:relative;overflow:hidden;">
 
